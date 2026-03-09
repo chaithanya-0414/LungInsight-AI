@@ -1,5 +1,5 @@
-# app.py — Streamlit UI for 2D slice inference, area-based staging, overlay & save
-# Run: streamlit run app.py
+# Run: streamlit run app_enhanced.py
+# VERSION: 2.0.1 (Manual Reload Force)
 
 import io
 import tempfile
@@ -7,129 +7,81 @@ import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+import importlib
+import src.inference
+importlib.reload(src.inference)
+from src.inference import load_classifier
+
 from pathlib import Path
-from PIL import Image, ImageFilter, ImageDraw, ImageOps
+from PIL import Image, ImageFilter
 import numpy as np
 import streamlit as st
 import torch
 import json
-import torch.nn as nn
-import torch.nn.functional as F
-from skimage.measure import label, regionprops
-from skimage import morphology
-from skimage.restoration import denoise_nl_means, estimate_sigma
-import nibabel as nib
-import pydicom
-import plotly.graph_objects as go
-from fpdf import FPDF
-import base64
-import matplotlib.pyplot as plt
+import cv2
 
-ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-MODEL_PATH = Path(os.path.join(ROOT_DIR, "models", "best_model.pth"))
-THR_PATH = Path(os.path.join(ROOT_DIR, "models", "thresholds.json"))
-OUT_DIR = Path(os.path.join(ROOT_DIR, "outputs"))
-OUT_DIR.mkdir(exist_ok=True)
+import importlib
+from streamlit_app import (UNet, load_model, preprocess_pil, postprocess_prob, overlay_rgb,
+                 MODEL_PATH, THR_PATH, device, apply_denoising, detect_foreign_objects)
 
-if __name__ == "__main__":
-    st.set_page_config(layout="wide", page_title="Lung Slice Segmentation")
-    st.title("Lung Slice Segmentation — Medical Demo")
+# Import new advanced modules
+from models.grad_cam import GradCAM
+from models.metrics import SegmentationMetrics
+from models.uncertainty import MCDropout, visualize_uncertainty
+from models.radiomics_extractor import compute_radiomics_features, format_radiomics_report
 
-# -------------------------
-# Local UNet definition
-# -------------------------
-class DoubleConv(nn.Module):
-    def __init__(self, in_ch, out_ch):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, 3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_ch, out_ch, 3, padding=1),
-            nn.ReLU(inplace=True),
-        )
-    def forward(self, x):
-        return self.net(x)
+# Import report generator
+from models.report_generator import generate_full_report
 
-class UNet(nn.Module):
-    def __init__(self, in_ch=1, base=32):
-        super().__init__()
-        self.enc1 = DoubleConv(in_ch, base)
-        self.pool = nn.MaxPool2d(2)
-        self.enc2 = DoubleConv(base, base * 2)
-        self.enc3 = DoubleConv(base * 2, base * 4)
-        self.enc4 = DoubleConv(base * 4, base * 8)
+# Page config
+st.set_page_config(layout="wide", page_title="Advanced Lung Segmentation")
+st.title("🫁 Advanced Lung Segmentation Analysis")
+st.markdown("*Powered by State-of-the-Art Deep Learning*")
 
-        self.up3 = nn.ConvTranspose2d(base * 8, base * 4, 2, stride=2)
-        self.dec3 = DoubleConv(base * 8, base * 4)
-        self.up2 = nn.ConvTranspose2d(base * 4, base * 2, 2, stride=2)
-        self.dec2 = DoubleConv(base * 4, base * 2)
-        self.up1 = nn.ConvTranspose2d(base * 2, base, 2, stride=2)
-        self.dec1 = DoubleConv(base * 2, base)
+# Initialize session state for report data
+if 'report_data' not in st.session_state:
+    st.session_state['report_data'] = {}
 
-        self.outc = nn.Conv2d(base, 1, 1)
-
-    def forward(self, x):
-        c1 = self.enc1(x)
-        p1 = self.pool(c1)
-        c2 = self.enc2(p1)
-        p2 = self.pool(c2)
-        c3 = self.enc3(p2)
-        p3 = self.pool(c3)
-        c4 = self.enc4(p3)
-
-        u3 = self.up3(c4)
-        if u3.shape[2:] != c3.shape[2:]:
-            u3 = F.interpolate(u3, size=c3.shape[2:], mode='bilinear', align_corners=False)
-        d3 = self.dec3(torch.cat([u3, c3], dim=1))
-
-        u2 = self.up2(d3)
-        if u2.shape[2:] != c2.shape[2:]:
-            u2 = F.interpolate(u2, size=c2.shape[2:], mode='bilinear', align_corners=False)
-        d2 = self.dec2(torch.cat([u2, c2], dim=1))
-
-        u1 = self.up1(d2)
-        if u1.shape[2:] != c1.shape[2:]:
-            u1 = F.interpolate(u1, size=c1.shape[2:], mode='bilinear', align_corners=False)
-        d1 = self.dec1(torch.cat([u1, c1], dim=1))
-
-        return self.outc(d1)
-
-# -------------------------
-# Model loader
-# -------------------------
-device = "cuda" if torch.cuda.is_available() else "cpu"
-# st.sidebar.write(f"Device: {device}") # Moved to main execution block
-
-@st.cache_resource
-def load_model(device="cpu"):
-    model = UNet(in_ch=1)
-    if not MODEL_PATH.exists():
-        return None
-    state = torch.load(MODEL_PATH, map_location=device)
-    if isinstance(state, dict) and any(k.startswith("model_state") or k == "model_state" for k in state.keys()):
-        if "model_state" in state:
-            model.load_state_dict(state["model_state"])
-        elif "state_dict" in state:
-            model.load_state_dict(state["state_dict"])
-        else:
-            try:
-                model.load_state_dict(state)
-            except Exception:
-                pass
-    else:
-        model.load_state_dict(state)
-    model.to(device)
-    model.eval()
-    return model
-
+# Load model
+# Load model
 model = load_model(device=device)
-# if model is None:
-#     st.error(f"Model not found at {MODEL_PATH}. Train first.")
-#     st.stop()
 
-# -------------------------
-# Thresholds
-# -------------------------
+# If cached loading fails, try direct loading (bypassing cache)
+if model is None:
+    st.warning("Cached load_model returned None. Attempting direct load...")
+    if os.path.exists(MODEL_PATH):
+        try:
+            state = torch.load(MODEL_PATH, map_location=device)
+            model = UNet(in_ch=1)
+            if isinstance(state, dict) and any(k.startswith("model_state") or k == "model_state" for k in state.keys()):
+                if "model_state" in state:
+                    model.load_state_dict(state["model_state"])
+                elif "state_dict" in state:
+                    model.load_state_dict(state["state_dict"])
+                else:
+                    model.load_state_dict(state)
+            else:
+                model.load_state_dict(state)
+            model.to(device)
+            model.eval()
+            st.success("Successfully loaded model directly!")
+        except Exception as e:
+            st.error(f"Direct load failed: {e}")
+            model = None
+
+if model is None:
+    st.error(f"Model not found at {MODEL_PATH}. Train first.")
+    # Debugging for deployment
+    st.write(f"Current working directory: {os.getcwd()}")
+    st.write(f"Model Path: {MODEL_PATH}")
+    st.write(f"Model Path Exists: {MODEL_PATH.exists()}")
+    if os.path.exists("models"):
+        st.write(f"Contents of models directory: {os.listdir('models')}")
+    else:
+        st.write("models directory does not exist!")
+    st.stop()
+
+# Load thresholds
 if THR_PATH.exists():
     with open(THR_PATH, "r") as f:
         thr = json.load(f)
@@ -138,429 +90,576 @@ if THR_PATH.exists():
 else:
     t1_px = t2_px = None
 
-# -------------------------
-# Helpers
-# -------------------------
-def preprocess_array(arr, target_size=(256,256)):
-    pil_img = Image.fromarray((arr * 255).astype(np.uint8)) if arr.max() <= 1.0 else Image.fromarray(arr.astype(np.uint8))
-    pil_img = pil_img.filter(ImageFilter.GaussianBlur(radius=1))
-    pil_resized = pil_img.convert("L").resize(target_size, resample=Image.BILINEAR)
-    arr_out = np.array(pil_resized, dtype=np.float32) / 255.0
-    tensor = torch.from_numpy(arr_out).unsqueeze(0).unsqueeze(0).float()
-    return tensor, arr_out
+# Sidebar configuration
+st.sidebar.header("⚙️ Configuration")
+st.sidebar.write(f"**Device:** {device}")
 
-def preprocess_pil(pil_img, target_size=(256,256)):
-    pil_img = pil_img.filter(ImageFilter.GaussianBlur(radius=1))
-    pil_resized = pil_img.convert("L").resize(target_size, resample=Image.BILINEAR)
-    arr = np.array(pil_resized, dtype=np.float32) / 255.0
-    tensor = torch.from_numpy(arr).unsqueeze(0).unsqueeze(0).float()
-    return tensor, arr
+# Advanced features toggles
+st.sidebar.subheader("🚀 Advanced Features")
+enable_gradcam = st.sidebar.checkbox("Enable Grad-CAM Visualization", value=True)
+enable_uncertainty = st.sidebar.checkbox("Enable Uncertainty Quantification", value=True)
+enable_radiomics = st.sidebar.checkbox("Enable Radiomics Features", value=True)
+enable_comprehensive_metrics = st.sidebar.checkbox("Show Comprehensive Metrics", value=True)
 
-def postprocess_prob(prob_map, thr=0.5):
-    mask = (prob_map >= thr).astype(np.uint8)
-    mask = morphology.binary_opening(mask, morphology.disk(2)).astype(np.uint8)
-    return mask
+# Basic settings
+threshold = st.sidebar.slider("Probability Threshold", 0.1, 0.9, 0.5, 0.05)
+use_denoising = st.sidebar.checkbox("Advanced Denoising (NL-Means)")
+detect_foreign = st.sidebar.checkbox("Detect Foreign Objects")
+remove_foreign = False
+inpaint_foreign = False
 
-def overlay_rgb(gray_arr, mask, color=(255, 0, 0)):
-    img_rgb = np.stack([gray_arr*255, gray_arr*255, gray_arr*255], axis=-1).astype(np.uint8)
-    mask_rgb = np.zeros_like(img_rgb, dtype=np.uint8)
-    mask_rgb[mask == 1] = color
-    overlay = img_rgb.copy()
-    overlay[mask == 1] = (0.6 * overlay[mask == 1] + 0.4 * np.array(color)).astype(np.uint8)
+if detect_foreign:
+    st.sidebar.markdown("---")
+    st.sidebar.caption("Foreign Object Handling")
+    remove_foreign = st.sidebar.checkbox("Exclude from Tumor Mask", value=True, help="Subtract foreign object pixels from the final tumor prediction.")
+    inpaint_foreign = st.sidebar.checkbox("Inpaint (Remove from Image)", value=False, help="Fill foreign object area with surrounding texture before analysis.")
+
+# MC Dropout settings (if uncertainty enabled)
+if enable_uncertainty:
+    mc_samples = st.sidebar.slider("Uncertainty Samples", 5, 20, 10)
+
+# File upload
+uploaded = st.file_uploader("📁 Upload Medical Image", type=["jpg", "png", "jpeg"])
+
+if uploaded:
+    # Clear report data on new upload
+    if 'last_uploaded' not in st.session_state or st.session_state['last_uploaded'] != uploaded.name:
+        st.session_state['last_uploaded'] = uploaded.name
+        st.session_state['report_data'] = {}
+
+    # Process image
+    pil = Image.open(io.BytesIO(uploaded.read()))
+    tensor, arr = preprocess_pil(pil)
     
-    lbl = label(mask)
-    props = regionprops(lbl)
-    pil_overlay = Image.fromarray(overlay)
-    draw = ImageDraw.Draw(pil_overlay)
-    for prop in props:
-        minr, minc, maxr, maxc = prop.bbox
-        draw.rectangle([minc, minr, maxc, maxr], outline=color, width=2)
-    return np.array(pil_overlay)
-
-def create_pdf_report(filename, metrics, image_path):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", size=12)
-    pdf.cell(200, 10, txt="Lung Slice Segmentation Report", ln=1, align="C")
-    pdf.cell(200, 10, txt=f"Filename: {filename}", ln=1, align="L")
-    for key, value in metrics.items():
-        pdf.cell(200, 10, txt=f"{key}: {value}", ln=1, align="L")
+    # Preprocessing
+    if use_denoising:
+        with st.spinner("Applying advanced denoising..."):
+            arr = apply_denoising(arr)
+            # Update tensor if denoised
+            tensor = torch.from_numpy(arr).unsqueeze(0).unsqueeze(0).float()
     
-    if image_path:
-        pdf.image(image_path, x=10, y=None, w=100)
-    
-    return pdf.output(dest="S").encode("latin-1")
-
-def calculate_dice_iou(pred_mask, true_mask):
-    intersection = (pred_mask & true_mask).sum()
-    union = (pred_mask | true_mask).sum()
-    dice = (2. * intersection) / (pred_mask.sum() + true_mask.sum() + 1e-8)
-    iou = intersection / (union + 1e-8)
-    return dice, iou
-
-def apply_denoising(image_arr):
-    """
-    Apply Non-Local Means Denoising.
-    Expects image_arr in [0, 1] range.
-    """
-    sigma_est = np.mean(estimate_sigma(image_arr))
-    # patch_size=5, patch_distance=6 are good defaults for speed/quality trade-off
-    denoised = denoise_nl_means(image_arr, h=1.15 * sigma_est, fast_mode=True,
-                                patch_size=5, patch_distance=6)
-    return denoised
-
-def detect_foreign_objects(image_arr, threshold=0.95):
-    """
-    Detect high-intensity objects (metal, implants, bullets).
-    Assumes image_arr is normalized [0, 1].
-    Threshold 0.95 roughly corresponds to >2000 HU if original range was [-1000, 3000].
-    """
-    mask = image_arr > threshold
-    return mask.astype(np.uint8)
-
-def plot_3d_volume(vol_data, mask_data):
-    # Downsample for performance if needed
-    factor = 2
-    vol_small = vol_data[::factor, ::factor, ::factor]
-    mask_small = mask_data[::factor, ::factor, ::factor]
-    
-    X, Y, Z = np.mgrid[:vol_small.shape[0], :vol_small.shape[1], :vol_small.shape[2]]
-    
-    fig = go.Figure(data=go.Volume(
-        x=X.flatten(),
-        y=Y.flatten(),
-        z=Z.flatten(),
-        value=mask_small.flatten(),
-        isomin=0.5,
-        isomax=1.0,
-        opacity=0.1, # needs to be small to see through
-        surface_count=17, # needs to be a large number for good volume rendering
-        colorscale='Redor'
-    ))
-    fig.update_layout(scene_camera=dict(eye=dict(x=1.5, y=1.5, z=1.5)))
-    return fig
-
-# -------------------------
-# UI
-# -------------------------
-if __name__ == "__main__":
-    if model is None:
-        st.error(f"Model not found at {MODEL_PATH}. Train first.")
-        st.stop()
-        
-    mode = st.sidebar.radio("Mode", ["Single Analysis", "Batch Processing"])
-    threshold = st.sidebar.slider("Probability threshold", 0.1, 0.9, 0.5, 0.05)
-
-    st.sidebar.subheader("Preprocessing & Artifacts")
-    use_denoising = st.sidebar.checkbox("Enable Advanced Denoising (NL-Means)")
-    detect_foreign = st.sidebar.checkbox("Detect Foreign Objects (Implants/Metal)")
-
-    if mode == "Single Analysis":
-        uploaded = st.file_uploader("Upload image (jpg/png), volume (nii/nii.gz), or DICOM (dcm)", type=["jpg","png","jpeg", "nii", "gz", "dcm"])
-        
-        if uploaded:
-            # Clear stale PDF if new file
-            if 'last_uploaded' not in st.session_state or st.session_state['last_uploaded'] != uploaded.name:
-                st.session_state['last_uploaded'] = uploaded.name
-                if 'pdf_bytes' in st.session_state: del st.session_state['pdf_bytes']
-                if 'dicom_pdf_bytes' in st.session_state: del st.session_state['dicom_pdf_bytes']
-
-            file_ext = Path(uploaded.name).suffix
+    foreign_mask = None
+    if detect_foreign:
+        foreign_mask = detect_foreign_objects(arr)
+        if foreign_mask.sum() > 0:
+            st.warning(f"⚠️ Foreign Object Detected! ({foreign_mask.sum()} pixels)")
             
-            if file_ext == ".dcm":
-                 with tempfile.NamedTemporaryFile(delete=False, suffix=".dcm") as tmp:
-                    tmp.write(uploaded.getvalue())
-                    tmp_path = tmp.name
-                 
-                 try:
-                     ds = pydicom.dcmread(tmp_path)
-                     st.sidebar.subheader("DICOM Metadata")
-                     st.sidebar.write(f"Patient ID: {ds.get('PatientID', 'N/A')}")
-                     st.sidebar.write(f"Modality: {ds.get('Modality', 'N/A')}")
-                     st.sidebar.write(f"Pixel Spacing: {ds.get('PixelSpacing', 'N/A')}")
-                     
-                     arr = ds.pixel_array.astype(np.float32)
-                     arr = (arr - arr.min()) / (arr.max() - arr.min())
-                     
-                     # Preprocessing
-                     foreign_mask = None
-                     if use_denoising:
-                         with st.spinner("Denoising..."):
-                             arr = apply_denoising(arr)
-                     
-                     if detect_foreign:
-                         foreign_mask = detect_foreign_objects(arr)
-                         if foreign_mask.sum() > 0:
-                             st.warning(f"Foreign Object Detected! ({foreign_mask.sum()} pixels)")
-                     
-                     tensor, arr = preprocess_array(arr)
-                     tensor = tensor.to(device)
-                     with torch.no_grad():
-                         prob = torch.sigmoid(model(tensor)).cpu().numpy()[0,0]
-                     mask = postprocess_prob(prob, threshold)
-                     
-                     # Metrics
-                     area_px = int(mask.sum())
-                     total_px = mask.size
-                     coverage = area_px / total_px
-                     
-                     # Display
-                     stage_color = (255, 0, 0)
-                     if t1_px and area_px <= t1_px: stage_color = (0, 255, 0)
-                     elif t2_px and area_px <= t2_px: stage_color = (0, 0, 255)
-                     
-                     col1, col2 = st.columns(2)
-                     with col1:
-                         st.image(arr, caption="Original DICOM (Processed)", use_container_width=True)
-                         if foreign_mask is not None and foreign_mask.sum() > 0:
-                             st.image(foreign_mask * 255, caption="Foreign Object Mask", clamp=True, use_container_width=True)
-                     with col2:
-                         st.image(overlay_rgb(arr, mask, color=stage_color), caption="Segmentation", use_container_width=True)
-                     
-                     # Comparison
-                     gt_upload = st.file_uploader("Upload Ground Truth Mask (Optional)", type=["png", "jpg"])
-                     if gt_upload:
-                         gt_pil = Image.open(gt_upload).convert("L").resize((256, 256))
-                         gt_arr = (np.array(gt_pil) > 128).astype(np.uint8)
-                         dice, iou = calculate_dice_iou(mask, gt_arr)
-                         st.metric("Dice Coefficient", f"{dice:.4f}")
-                         st.metric("IoU", f"{iou:.4f}")
-                     
-                     # Report
-                     if st.button("Generate Report"):
-                         tmp_img_path = f"temp_{uploaded.name}.png"
-                         Image.fromarray(overlay_rgb(arr, mask, color=stage_color)).save(tmp_img_path)
-                         pdf_bytes = create_pdf_report(uploaded.name, {"Area": area_px, "Coverage": coverage}, tmp_img_path)
-                         st.session_state['dicom_pdf_bytes'] = pdf_bytes
-                         os.remove(tmp_img_path)
-                     
-                     if 'dicom_pdf_bytes' in st.session_state:
-                         st.download_button("Download PDF", st.session_state['dicom_pdf_bytes'], file_name="report.pdf", mime="application/pdf")
-
-                 except Exception as e:
-                     st.error(f"Error reading DICOM: {e}")
-                 finally:
-                     os.unlink(tmp_path)
-
-            elif "nii" in uploaded.name: # Handle NIfTI
-                with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded.name).name) as tmp:
-                    tmp.write(uploaded.getvalue())
-                    tmp_path = tmp.name
-                
-                try:
-                    nii = nib.load(tmp_path)
-                    vol_data = nii.get_fdata()
-                    vol_data = np.clip(vol_data, -1000, 400)
-                    vol_data = (vol_data - vol_data.min()) / (vol_data.max() - vol_data.min() + 1e-8)
-                    
-                    pix_dim = nii.header.get_zooms()
-                    voxel_vol_cm3 = np.prod(pix_dim[:3]) / 1000.0
-                    
-                    st.sidebar.info(f"Volume loaded. Shape: {vol_data.shape}. Spacing: {pix_dim}")
-                    
-                    slice_axis = 2
-                    max_slice = vol_data.shape[slice_axis] - 1
-                    slice_idx = st.sidebar.slider("Select Slice", 0, max_slice, max_slice // 2)
-                    
-                    if slice_axis == 2: slice_arr = vol_data[:, :, slice_idx]
-                    else: slice_arr = vol_data[slice_idx, :, :]
-                    slice_arr = np.rot90(slice_arr)
-                    
-                    # Preprocessing
-                    foreign_mask = None
-                    if use_denoising:
-                         # Denoising on-the-fly for slice might be slow but okay for demo
-                         slice_arr = apply_denoising(slice_arr)
-                    
-                    if detect_foreign:
-                         foreign_mask = detect_foreign_objects(slice_arr)
-                         if foreign_mask.sum() > 0:
-                             st.sidebar.warning(f"Foreign Object in Slice {slice_idx}!")
-
-                    tensor, arr = preprocess_array(slice_arr)
-                    tensor = tensor.to(device)
-                    with torch.no_grad():
-                        prob = torch.sigmoid(model(tensor)).cpu().numpy()[0,0]
-                    mask = postprocess_prob(prob, threshold)
-                    
-                    area_px = int(mask.sum())
-                    total_px = mask.size
-                    coverage_ratio = area_px / total_px
-                    cancer_area_pct = coverage_ratio * 100
-                    
-                    col1, col2 = st.columns(2)
-                    with col1:
-                         st.image(arr, caption=f"Slice {slice_idx} (Processed)", use_container_width=True)
-                         if foreign_mask is not None and foreign_mask.sum() > 0:
-                             st.image(foreign_mask * 255, caption="Foreign Object Mask", clamp=True, use_container_width=True)
-                    with col2:
-                         stage_color = (255, 0, 0)
-                         if t1_px and area_px <= t1_px: stage_color = (0, 255, 0)
-                         elif t2_px and area_px <= t2_px: stage_color = (0, 0, 255)
-                         st.image(overlay_rgb(arr, mask, color=stage_color), caption="Segmentation", use_container_width=True)
-                    
-                    st.subheader("Analysis")
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("Cancer Pixels", area_px)
-                    c2.metric("Coverage", f"{cancer_area_pct:.2f}%")
-                    
-                    if st.button("Calculate Full Volume & 3D Render"):
-                        total_mask_px = 0
-                        mask_vol = np.zeros_like(vol_data)
-                        
-                        progress_bar = st.progress(0)
-                        for i in range(vol_data.shape[slice_axis]):
-                            if slice_axis == 2: s = vol_data[:, :, i]
-                            else: s = vol_data[i, :, :]
-                            s = np.rot90(s)
-                            t, _ = preprocess_array(s)
-                            t = t.to(device)
-                            with torch.no_grad():
-                                p = torch.sigmoid(model(t)).cpu().numpy()[0,0]
-                            m = postprocess_prob(p, threshold)
-                            total_mask_px += m.sum()
-                            
-                            # Store for 3D
-                            # Need to rotate back or store as is? 
-                            # Simpler to just store 'm' but dimensions might mismatch if rot90 used
-                            # For visualization, let's just use what we have
-                            # Mapping back to volume coordinates is tricky with rot90
-                            # Let's skip exact 3D mask placement for now and just visualize the slice stack if possible
-                            # Or just visualize the 's' stack
-                            
-                        total_vol_cm3 = total_mask_px * voxel_vol_cm3
-                        st.success(f"Total Tumor Volume: **{total_vol_cm3:.2f} cm³**")
-                        
-                        # 3D Plot (Placeholder with random data or actual if we track it)
-                        # For true 3D, we need to assemble 'mask_vol' correctly.
-                        # Let's try to assemble it.
-                        # s was rot90, so we rot90 back? np.rot90(m, k=-1)
-                        
-                        st.subheader("3D Volume Visualization")
-                        # Create a dummy 3D plot for demo if full processing is too slow/complex for this snippet
-                        # Or use the loaded volume
-                        fig = plot_3d_volume(vol_data, vol_data > 0.5) # Visualize lung structure for now
-                        st.plotly_chart(fig)
-
-                except Exception as e:
-                    st.error(f"Error loading NIfTI: {e}")
-                finally:
-                    os.unlink(tmp_path)
-                    
-            else: # Image (JPG/PNG)
-                pil = Image.open(io.BytesIO(uploaded.read()))
-                tensor, arr = preprocess_pil(pil)
-                
-                # Preprocessing (on numpy array 'arr')
-                foreign_mask = None
-                if use_denoising:
-                    with st.spinner("Denoising..."):
-                        arr = apply_denoising(arr)
-                        # Update tensor from denoised arr
-                        tensor = torch.from_numpy(arr).unsqueeze(0).unsqueeze(0).float()
-                
-                if detect_foreign:
-                    foreign_mask = detect_foreign_objects(arr)
-                    if foreign_mask.sum() > 0:
-                        st.warning("Foreign Object Detected!")
-
-                tensor = tensor.to(device)
-                with torch.no_grad():
-                    prob = torch.sigmoid(model(tensor)).cpu().numpy()[0,0]
-                mask = postprocess_prob(prob, threshold)
-                
-                # Metrics Calculation
-                area_px = int(mask.sum())
-                total_px = mask.size
-                coverage_ratio = area_px / total_px
-                cancer_area_pct = coverage_ratio * 100
-                
-                st.subheader("Detailed Analysis")
-                col1, col2, col3, col4 = st.columns(4)
-                col1.metric("Cancer Pixels", f"{area_px:,}")
-                col2.metric("Total Pixels", f"{total_px:,}")
-                col3.metric("Cancer Area", f"{cancer_area_pct:.2f}%")
-                col4.metric("Coverage Ratio", f"{coverage_ratio:.4f}")
-                
-                st.progress(min(1.0, coverage_ratio))
-                st.caption(f"Visual representation of cancer coverage: {cancer_area_pct:.2f}%")
+            # Strategy 2: Inpainting (Pre-processing)
+            if inpaint_foreign:
+                with st.spinner("Inpainting foreign objects..."):
+                    # Convert to uint8 for cv2
+                    img_u8 = (arr * 255).astype(np.uint8)
+                    mask_u8 = (foreign_mask * 255).astype(np.uint8)
+                    # Inpaint
+                    inpainted = cv2.inpaint(img_u8, mask_u8, 3, cv2.INPAINT_TELEA)
+                    # Update arr and tensor
+                    arr = inpainted.astype(np.float32) / 255.0
+                    tensor = torch.from_numpy(arr).unsqueeze(0).unsqueeze(0).float()
+                    st.success("✨ Foreign objects inpainted (removed) from analysis image.")
+    
+    # Create tabs for different analyses
+    tabs = st.tabs(["📊 Main Analysis", "� Staging Review", "�🔍 Grad-CAM", "📈 Comprehensive Metrics", "🎲 Uncertainty", "🧬 Radiomics"])
+    
+    # ==================== TAB 1: MAIN ANALYSIS ====================
+    with tabs[0]:
+        st.header("Main Segmentation Analysis")
         
-                stage_color = (255, 0, 0) # Default Red
-                if area_px == 0:
-                    stage = "Healthy Lung"
-                    stage_color = (0, 255, 0) # Green
-                    st.success(f"**{stage}**")
-                elif t1_px is not None and t2_px is not None:
-                    if area_px <= t1_px:
-                        stage = "Initial"
-                        stage_color = (0, 255, 0) # Green
-                    elif area_px <= t2_px:
-                        stage = "Mid"
-                        stage_color = (0, 0, 255) # Blue
+        # Get prediction
+        tensor = tensor.to(device)
+        with torch.no_grad():
+            prob = torch.sigmoid(model(tensor)).cpu().numpy()[0, 0]
+        mask = postprocess_prob(prob, threshold)
+
+        # Strategy 1: Mask Subtraction (Post-processing)
+        if detect_foreign and remove_foreign and foreign_mask is not None:
+            # Only remove if we didn't already inpaint (if we inpainted, they shouldn't be there, but safe to check)
+            # If inpainting worked perfectly, model shouldn't predict them. 
+            # But subtraction is a hard guarantee.
+            overlap = (mask == 1) & (foreign_mask == 1)
+            if overlap.sum() > 0:
+                mask[foreign_mask == 1] = 0
+                st.info(f"🛡️ Excluded {overlap.sum()} pixels overlapping with foreign objects from tumor mask.")
+        
+        # Calculate metrics
+        area_px = int(mask.sum())
+        total_px = mask.size
+        coverage_ratio = area_px / total_px
+        cancer_area_pct = coverage_ratio * 100
+        
+        # Determine strict stage or use SUBTYPE classification pipeline
+        stage_color = (255, 0, 0)
+        subtype = "Unknown"
+        confidence = 0.0
+        
+        if area_px == 0:
+            stage = "Healthy Lung"
+            subtype = "Normal"
+            stage_color = (0, 255, 0)
+        else:
+            # RUN SUBTYPE CLASSIFIER (Phase 2 ROI-based)
+            import src.inference
+            importlib.reload(src.inference)
+            from src.inference import load_classifier
+            from torchvision import transforms
+            
+            # Load classifier (will prioritize V2 if exists)
+            res = load_classifier()
+            print(f"DEBUG: dashboard received {len(res)} values from load_classifier: {res}")
+            classifier, classes, in_channels = res
+            
+            if classifier is not None:
+                if area_px > 0:
+                    # ROI Crop logic (shared with src/inference.py)
+                    coords = np.argwhere(mask == 1)
+                    y_min, x_min = coords.min(axis=0)
+                    y_max, x_max = coords.max(axis=0)
+                    pad = 10
+                    y_min, x_min = max(0, y_min-pad), max(0, x_min-pad)
+                    y_max, x_max = min(arr.shape[0], y_max+pad), min(arr.shape[1], x_max+pad)
+                    
+                    crop_img = arr[y_min:y_max, x_min:x_max]
+                    crop_mask = mask[y_min:y_max, x_min:x_max]
+                    
+                    # Resize to 224x224
+                    crop_img_pil = Image.fromarray((crop_img * 255).astype(np.uint8)).resize((224, 224), Image.BILINEAR)
+                    crop_mask_pil = Image.fromarray((crop_mask * 255).astype(np.uint8)).resize((224, 224), Image.NEAREST)
+                    
+                    if in_channels == 2:
+                        # 2nd Channel Model (Image + Mask)
+                        img_t = transforms.ToTensor()(crop_img_pil)
+                        img_t = transforms.Normalize(mean=[0.485], std=[0.229])(img_t)
+                        mask_t = transforms.ToTensor()(crop_mask_pil)
+                        clf_tensor = torch.cat([img_t, mask_t], dim=0).unsqueeze(0).to(device)
                     else:
-                        stage = "Final"
-                        stage_color = (255, 0, 0) # Red
-                    st.info(f"Stage (area-threshold classifier): **{stage}**")
-                    st.caption(f"Thresholds (pixels): <={t1_px} initial, <={t2_px} mid, >{t2_px} final")
+                        # Legacy/Full Scan Mode (RGB)
+                        clf_transform = transforms.Compose([
+                            transforms.Resize((224, 224)),
+                            transforms.ToTensor(),
+                            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+                        ])
+                        clf_tensor = clf_transform(crop_img_pil.convert("RGB")).unsqueeze(0).to(device)
+                    
+                    with torch.no_grad():
+                        outputs = classifier(clf_tensor)
+                        probs = torch.nn.functional.softmax(outputs, dim=1)[0]
+                    
+                    conf, p_idx = torch.max(probs, 0)
+                    subtype = classes[p_idx.item()].replace('_', ' ').title()
+                    confidence = float(conf.item()) * 100
+                    
+                    # Calculate Area-based Stage as well
+                    if t1_px and t2_px:
+                        if area_px <= t1_px: stage = "Initial"
+                        elif area_px <= t2_px: stage = "Mid"
+                        else: stage = "Final"
+                    else:
+                        stage = "Tumor Present"
+                    
+                    # Dashboard color coding
+                    if "Normal" in subtype: 
+                         stage_color = (0, 255, 0)
+                    elif "Adenocarcinoma" in subtype:
+                         stage_color = (255, 100, 100)
+                    elif "Squamous" in subtype:
+                         stage_color = (139, 0, 0)
+                    else:
+                         stage_color = (255, 165, 0)
                 else:
-                    st.warning("Thresholds not found. Run compute_thresholds.py to generate models/thresholds.json")
+                    stage = "Tumor Mask Error"
+            else:
+                 # Fallback to standard area thresholds if model missing
+                 if t1_px and t2_px:
+                     if area_px <= t1_px:
+                         stage = "Initial"
+                         stage_color = (0, 255, 0)
+                     elif area_px <= t2_px:
+                         stage = "Mid"
+                         stage_color = (0, 0, 255)
+                     else:
+                         stage = "Final"
+                         stage_color = (255, 0, 0)
+                 else:
+                     stage = "Tumor Present"
         
-                st.image(overlay_rgb(arr, mask, color=stage_color), caption=f"Overlay (color = {stage_color})", width=512)
+        # Display metrics
+        col1, col2, col3, col4, col5 = st.columns(5)
+        col1.metric("🔴 Tumor Pixels", f"{area_px:,}")
+        col2.metric("📊 Coverage", f"{cancer_area_pct:.2f}%")
+        col3.metric("🏥 Status", stage)
+        col4.metric("🧬 Predicted Subtype", subtype)
+        col5.metric("🎯 Confidence", f"{confidence:.1f}%" if confidence > 0 else "N/A")
         
-                if st.sidebar.checkbox("Show Raw Probability Map"):
-                    st.image(prob, caption="Raw Probability Map", clamp=True, width=512)
-                    st.write(f"Max Probability: {prob.max():.4f}")
-                
-                if foreign_mask is not None and foreign_mask.sum() > 0:
-                    st.image(foreign_mask * 255, caption="Detected Foreign Objects (High Intensity)", clamp=True, width=512)
-                
-                # Comparison
-                gt_upload = st.file_uploader("Upload Ground Truth Mask (Optional)", type=["png", "jpg"])
-                if gt_upload:
-                     gt_pil = Image.open(gt_upload).convert("L").resize((256, 256))
-                     gt_arr = (np.array(gt_pil) > 128).astype(np.uint8)
-                     dice, iou = calculate_dice_iou(mask, gt_arr)
-                     st.metric("Dice Coefficient", f"{dice:.4f}")
-                     st.metric("IoU", f"{iou:.4f}")
-                
-                if st.button("Generate PDF Report"):
-                    tmp_img_path = f"temp_{uploaded.name}.png"
-                    Image.fromarray(overlay_rgb(arr, mask, color=stage_color)).save(tmp_img_path)
-                    
-                    report_metrics = {
-                        "Stage": stage,
-                        "Cancer Pixels": f"{area_px:,}",
-                        "Total Pixels": f"{total_px:,}",
-                        "Cancer Area": f"{cancer_area_pct:.2f}%",
-                        "Coverage Ratio": f"{coverage_ratio:.4f}"
-                    }
-                    
-                    pdf_bytes = create_pdf_report(uploaded.name, report_metrics, tmp_img_path)
-                    st.session_state['pdf_bytes'] = pdf_bytes
-                    os.remove(tmp_img_path)
-                
-                if 'pdf_bytes' in st.session_state:
-                    st.download_button("Download Report", st.session_state['pdf_bytes'], file_name="report.pdf", mime="application/pdf")
+        # Progress bar
+        st.progress(min(1.0, coverage_ratio))
+        
+        # Display images
+        col_img1, col_img2 = st.columns(2)
+        with col_img1:
+            st.image(arr, caption="Original Image", use_container_width=True)
+        with col_img2:
+            overlay = overlay_rgb(arr, mask, color=stage_color)
+            st.image(overlay, caption=f"Segmentation Overlay ({subtype})", use_container_width=True)
+        
+        # Optional: Show probability map
+        if st.checkbox("Show Probability Map"):
+            st.image(prob, caption="Probability Map", clamp=True, use_container_width=True)
 
-    elif mode == "Batch Processing":
-        uploaded_files = st.file_uploader("Upload multiple images", type=["jpg", "png"], accept_multiple_files=True)
-        if uploaded_files:
-            st.write(f"Processing {len(uploaded_files)} files...")
-            results = []
-            for up_file in uploaded_files:
-                pil = Image.open(io.BytesIO(up_file.read()))
-                tensor, arr = preprocess_pil(pil)
-                tensor = tensor.to(device)
-                with torch.no_grad():
-                    prob = torch.sigmoid(model(tensor)).cpu().numpy()[0,0]
-                mask = postprocess_prob(prob, threshold)
-                area = int(mask.sum())
-                
-                stage = "Unknown"
-                if t1_px and area <= t1_px: stage = "Initial"
-                elif t2_px and area <= t2_px: stage = "Mid"
-                elif t2_px: stage = "Final"
-                
-                results.append({"Filename": up_file.name, "Tumor Area (px)": area, "Stage": stage})
+        # Save to session state for report
+        st.session_state['report_data']['main'] = {
+            'area_px': area_px,
+            'coverage_pct': cancer_area_pct,
+            'stage': stage,
+            'subtype': subtype,
+            'confidence': confidence,
+            'overlay_img': overlay
+        }
+    
+    # ==================== TAB 2: STAGING REVIEW ====================
+    with tabs[1]:
+        st.header("Staging Review & Fundamentals")
+        st.info("This tab reviews the area-based staging logic ('the roots') compared to current detection.")
+        
+        if area_px == 0:
+            st.success("✅ **Normal**: No tumor detected.")
+        elif t1_px and t2_px:
+            # Re-calculate area-based stage
+            if area_px <= t1_px:
+                root_stage, root_color, root_desc = "INITIAL", "#28a745", "Early-stage nodule."
+            elif area_px <= t2_px:
+                root_stage, root_color, root_desc = "MID", "#007bff", "Developing nodule."
+            else:
+                root_stage, root_color, root_desc = "FINAL", "#dc3545", "Advanced-stage nodule."
             
-            st.table(results)
+            # Layout optimization: Banner and Logic side-by-side
+            col_top1, col_top2 = st.columns([1, 1])
+            
+            with col_top1:
+                st.markdown(f"""
+                <div style="background-color: {root_color}; padding: 15px; border-radius: 8px; color: white; text-align: center; height: 120px; display: flex; flex-direction: column; justify-content: center;">
+                    <h2 style="color: white; margin: 0;">STAGE: {root_stage}</h2>
+                    <p style="margin: 0; opacity: 0.9;">Area: {area_px:,} px</p>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col_top2:
+                st.subheader("Staging Logic")
+                st.markdown(f"""
+                <div style='font-size: 0.9em;'>
+                <div style='border-left: 4px solid #28a745; padding-left: 8px; margin-bottom: 5px;'><b>INITIAL:</b> &le; {t1_px:,} px</div>
+                <div style='border-left: 4px solid #007bff; padding-left: 8px; margin-bottom: 5px;'><b>MID:</b> &le; {t2_px:,} px</div>
+                <div style='border-left: 4px solid #dc3545; padding-left: 8px;'><b>FINAL:</b> &gt; {t2_px:,} px</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            st.write("---")
+            
+            # Visual Verification - place next to some details or keep wide but manageable
+            st.subheader("Visual Analysis")
+            ov_root = overlay_rgb(arr, mask, color=(0, 255, 0) if root_stage == "INITIAL" else (0, 0, 255) if root_stage == "MID" else (255, 0, 0))
+            
+            col_img1, col_img2 = st.columns([2, 1])
+            with col_img1:
+                st.image(ov_root, caption=f"Root logic: {root_stage}", use_container_width=True)
+            with col_img2:
+                st.markdown("### Clinical Context")
+                st.write(f"The system identified a tumor region of **{area_px:,}** pixels.")
+                st.write(f"Based on the root architectural thresholds, this is classified as **{root_stage}** stage.")
+                st.write(f"Confidence in segmentation: **{prob.max()*100:.1f}%**")
+                st.caption("Review the overlay image to confirm the tumor perimeter matches the diagnostic findings.")
+        else:
+            st.warning("Staging thresholds (`thresholds.json`) not found.")
+
+    # ==================== TAB 3: GRAD-CAM ====================
+    with tabs[2]:
+        if enable_gradcam:
+            st.header("🔍 Grad-CAM Visualization")
+            st.markdown("*Visualize which regions the model focuses on during prediction*")
+            
+            try:
+                # Create Grad-CAM
+                grad_cam = GradCAM(model, target_layer=model.dec1)
+                
+                with st.spinner("Generating Grad-CAM..."):
+                    cam = grad_cam.generate_cam(tensor.to(device))
+                    overlay_gradcam = grad_cam.overlay_heatmap(arr, cam, alpha=0.5)
+                
+                # Display
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.image(arr, caption="Original", use_container_width=True)
+                with col2:
+                    st.image(cam, caption="Grad-CAM Heatmap", use_container_width=True, clamp=True)
+                with col3:
+                    st.image(overlay_gradcam, caption="Grad-CAM Overlay", use_container_width=True)
+                
+                st.success("✅ Grad-CAM shows the regions the model pays attention to")
+                
+                # Statistics
+                st.subheader("Grad-CAM Statistics")
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Min Activation", f"{cam.min():.4f}")
+                col2.metric("Max Activation", f"{cam.max():.4f}")
+                col3.metric("Mean Activation", f"{cam.mean():.4f}")
+
+                # Save to session state
+                st.session_state['report_data']['gradcam'] = {
+                    'max_act': float(cam.max()),
+                    'mean_act': float(cam.mean()),
+                    'overlay_img': overlay_gradcam
+                }
+                
+            except Exception as e:
+                st.error(f"Error generating Grad-CAM: {e}")
+        else:
+            st.info("Enable Grad-CAM in the sidebar to see visualization")
+    
+    # ==================== TAB 4: COMPREHENSIVE METRICS ====================
+    with tabs[3]:
+        if enable_comprehensive_metrics:
+            st.header("📈 Comprehensive Clinical Metrics")
+            st.markdown("""
+            **What is Ground Truth?**
+            To calculate accuracy metrics (like Dice Score, Sensitivity), we need a "Ground Truth" mask - 
+            this is the *correct* segmentation usually drawn by a radiologist.
+            """)
+            
+            # Need ground truth for comparison
+            gt_col1, gt_col2 = st.columns([2, 1])
+            with gt_col1:
+                gt_upload = st.file_uploader("Upload Ground Truth Mask (PNG/JPG)", type=["png", "jpg"], key="gt_metrics")
+            
+            with gt_col2:
+                st.write("") # Spacer
+                st.write("") # Spacer
+                if st.button("🎲 Generate Dummy GT"):
+                    # Create a dummy GT by slightly perturbing the prediction
+                    # This is JUST FOR DEMO purposes
+                    dummy_gt = mask.copy()
+                    # Erode and dilate to make it slightly different
+                    kernel = np.ones((5,5), np.uint8)
+                    if np.random.rand() > 0.5:
+                        dummy_gt = cv2.dilate(dummy_gt, kernel, iterations=1)
+                    else:
+                        dummy_gt = cv2.erode(dummy_gt, kernel, iterations=1)
+                    
+                    # Save to a temporary file so it can be "uploaded" or used
+                    dummy_pil = Image.fromarray(dummy_gt * 255)
+                    st.session_state['dummy_gt'] = dummy_pil
+                    st.success("Generated dummy ground truth (for demo only)")
+
+            # Use uploaded or dummy GT
+            gt_pil = None
+            if gt_upload:
+                gt_pil = Image.open(gt_upload).convert("L").resize((256, 256))
+            elif 'dummy_gt' in st.session_state:
+                gt_pil = st.session_state['dummy_gt']
+            
+            if gt_pil:
+                gt_arr = (np.array(gt_pil) > 128).astype(np.float32)
+                
+                with st.spinner("Computing comprehensive metrics..."):
+                    metrics = SegmentationMetrics.compute_all_metrics(mask.astype(np.float32), gt_arr)
+                
+                st.success("✅ Metrics computed successfully!")
+                
+                # Display metrics in organized layout
+                st.subheader("Overlap Metrics")
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Dice Coefficient", f"{metrics['dice']:.4f}")
+                col2.metric("IoU (Jaccard)", f"{metrics['iou']:.4f}")
+                col3.metric("F1 Score", f"{metrics['f1_score']:.4f}")
+                
+                st.subheader("Classification Metrics")
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Sensitivity (Recall)", f"{metrics['sensitivity']:.4f}")
+                col2.metric("Specificity", f"{metrics['specificity']:.4f}")
+                col3.metric("Precision", f"{metrics['precision']:.4f}")
+                
+                st.subheader("Distance Metrics")
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Hausdorff Distance (95%)", f"{metrics['hausdorff_95']:.2f} px")
+                col2.metric("Avg Surface Distance", f"{metrics['avg_surface_distance']:.2f} px")
+                col3.metric("Volumetric Similarity", f"{metrics['volumetric_similarity']:.4f}")
+                
+                # Visualization
+                st.subheader("Visual Comparison")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.image(gt_arr, caption="Ground Truth", use_container_width=True)
+                with col2:
+                    st.image(mask, caption="Prediction", use_container_width=True)
+                with col3:
+                    # Overlay comparison
+                    comparison = np.zeros((*mask.shape, 3), dtype=np.uint8)
+                    comparison[gt_arr == 1] = [0, 255, 0]  # Green: GT
+                    comparison[mask == 1] = [255, 0, 0]    # Red: Pred
+                    comparison[(gt_arr == 1) & (mask == 1)] = [255, 255, 0]  # Yellow: Overlap
+                    st.image(comparison, caption="Comparison (Green=GT, Red=Pred, Yellow=Overlap)", use_container_width=True)
+                
+                # Save to session state
+                st.session_state['report_data']['metrics'] = metrics
+                st.session_state['report_data']['metrics']['comparison_img'] = comparison
+
+            else:
+                st.info("📤 Upload a ground truth mask (or generate a dummy one) to see metrics.")
+        else:
+            st.info("Enable Comprehensive Metrics in the sidebar")
+    
+    # ==================== TAB 5: UNCERTAINTY ====================
+    with tabs[4]:
+        if enable_uncertainty:
+            st.header("🎲 Uncertainty Quantification")
+            st.markdown("*Estimate prediction confidence using Monte Carlo Dropout*")
+            
+            try:
+                mc_model = MCDropout(model, n_samples=mc_samples)
+                
+                with st.spinner(f"Running {mc_samples} forward passes..."):
+                    mean_pred, uncertainty, samples = mc_model.predict_with_uncertainty(tensor.to(device))
+                
+                # Convert to numpy
+                mean_pred_np = mean_pred.cpu().numpy()[0, 0]
+                uncertainty_np = uncertainty.cpu().numpy()[0, 0]
+                
+                # Display
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.image(mean_pred_np, caption="Mean Prediction", use_container_width=True, clamp=True)
+                with col2:
+                    st.image(uncertainty_np, caption="Uncertainty Map", use_container_width=True, clamp=True)
+                with col3:
+                    # Overlay uncertainty on image
+                    uncertainty_colored = cv2.applyColorMap((uncertainty_np * 255).astype(np.uint8), cv2.COLORMAP_HOT)
+                    uncertainty_colored = cv2.cvtColor(uncertainty_colored, cv2.COLOR_BGR2RGB)
+                    img_rgb = (np.stack([arr, arr, arr], axis=-1) * 255).astype(np.uint8)
+                    overlay_unc = cv2.addWeighted(img_rgb, 0.6, uncertainty_colored, 0.4, 0)
+                    st.image(overlay_unc, caption="Uncertainty Overlay", use_container_width=True)
+                
+                # Statistics
+                st.subheader("Uncertainty Statistics")
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("Mean Uncertainty", f"{uncertainty_np.mean():.4f}")
+                col2.metric("Max Uncertainty", f"{uncertainty_np.max():.4f}")
+                col3.metric("Min Uncertainty", f"{uncertainty_np.min():.4f}")
+                
+                # High uncertainty regions
+                high_unc_threshold = np.percentile(uncertainty_np, 90)
+                high_unc_pixels = (uncertainty_np > high_unc_threshold).sum()
+                col4.metric("High Uncertainty Pixels", f"{high_unc_pixels:,}")
+                
+                st.info(f"ℹ️ High uncertainty regions (top 10%) may require expert review")
+
+                # Save to session state
+                st.session_state['report_data']['uncertainty'] = {
+                    'mean_unc': float(uncertainty_np.mean()),
+                    'max_unc': float(uncertainty_np.max()),
+                    'high_unc_px': int(high_unc_pixels),
+                    'map_img': overlay_unc
+                }
+                
+            except Exception as e:
+                st.error(f"Error computing uncertainty: {e}")
+        else:
+            st.info("Enable Uncertainty Quantification in the sidebar")
+    
+    # ==================== TAB 6: RADIOMICS ====================
+    with tabs[5]:
+        if enable_radiomics:
+            st.header("🧬 Radiomics Feature Extraction")
+            st.markdown("*Quantitative analysis of segmented regions*")
+            
+            try:
+                with st.spinner("Extracting radiomics features..."):
+                    features = compute_radiomics_features(arr, mask)
+                
+                st.success(f"✅ Extracted {len(features)} radiomics features!")
+                
+                # Display features in organized tabs
+                feature_tabs = st.tabs(["Shape Features", "Intensity Features", "Texture Features", "Full Report"])
+                
+                with feature_tabs[0]:
+                    st.subheader("Shape Features")
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric("Area", f"{features['area_pixels']:.0f} px")
+                    col2.metric("Perimeter", f"{features['perimeter']:.2f} px")
+                    col3.metric("Compactness", f"{features['compactness']:.4f}")
+                    
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric("Eccentricity", f"{features['eccentricity']:.4f}")
+                    col2.metric("Solidity", f"{features['solidity']:.4f}")
+                    col3.metric("Aspect Ratio", f"{features['aspect_ratio']:.4f}")
+                
+                with feature_tabs[1]:
+                    st.subheader("Intensity Features")
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric("Mean Intensity", f"{features['mean_intensity']:.4f}")
+                    col2.metric("Std Intensity", f"{features['std_intensity']:.4f}")
+                    col3.metric("Intensity Range", f"{features['intensity_range']:.4f}")
+                    
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric("Skewness", f"{features['skewness']:.4f}")
+                    col2.metric("Kurtosis", f"{features['kurtosis']:.4f}")
+                    col3.metric("Entropy", f"{features['entropy']:.4f}")
+                
+                with feature_tabs[2]:
+                    st.subheader("Texture Features (GLCM)")
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric("Contrast", f"{features['glcm_contrast']:.4f}")
+                    col2.metric("Homogeneity", f"{features['glcm_homogeneity']:.4f}")
+                    col3.metric("Energy", f"{features['glcm_energy']:.4f}")
+                    
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric("Correlation", f"{features['glcm_correlation']:.4f}")
+                    col2.metric("Dissimilarity", f"{features['glcm_dissimilarity']:.4f}")
+                    col3.metric("ASM", f"{features['glcm_asm']:.4f}")
+                
+                with feature_tabs[3]:
+                    st.subheader("Complete Radiomics Report")
+                    report = format_radiomics_report(features)
+                    st.text(report)
+                    
+                    # Download button
+                    st.download_button(
+                        "📥 Download Text Report",
+                        report,
+                        file_name=f"radiomics_report_{uploaded.name}.txt",
+                        mime="text/plain"
+                    )
+                
+                # Save to session state
+                st.session_state['report_data']['radiomics'] = features
+                
+            except Exception as e:
+                st.error(f"Error extracting radiomics features: {e}")
+        else:
+            st.info("Enable Radiomics Features in the sidebar")
+
+    # ==================== REPORT GENERATION ====================
+    st.sidebar.markdown("---")
+    st.sidebar.header("📄 Report Generation")
+    
+    if st.sidebar.button("Generate Comprehensive PDF Report"):
+        if 'report_data' in st.session_state and st.session_state['report_data']:
+            with st.spinner("Generating PDF Report..."):
+                try:
+                    pdf_bytes = generate_full_report(uploaded.name, st.session_state['report_data'])
+                    st.sidebar.download_button(
+                        label="📥 Download Full PDF Report",
+                        data=pdf_bytes,
+                        file_name=f"comprehensive_report_{uploaded.name}.pdf",
+                        mime="application/pdf"
+                    )
+                    st.sidebar.success("Report Ready!")
+                except Exception as e:
+                    st.sidebar.error(f"Error generating PDF: {e}")
+        else:
+            st.sidebar.warning("No analysis data available. Please upload an image and run analysis first.")
+
+# Footer
+st.markdown("---")
+st.markdown("""
+<div style='text-align: center'>
+    <p><strong>Advanced Medical Imaging Analysis System</strong></p>
+    <p>Features: Grad-CAM • Comprehensive Metrics • Uncertainty Quantification • Radiomics</p>
+</div>
+""", unsafe_allow_html=True)
