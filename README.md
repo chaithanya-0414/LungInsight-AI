@@ -68,7 +68,16 @@ python train_advanced.py --loss focal_tversky --model attention_unet --epochs 50
 ```
 
 ## 📸 Dashboard Interface
-*(Include screenshot of the Streamlit dashboard here like `![Dashboard](assets/dashboard.png)`)*
+*Our system generates comprehensive visual interpretation beyond standard segmentation.*
+
+### 1. Tumor Segmentation
+![Segmentation](assets/demo_segmentation.png)
+
+### 2. Grad-CAM Interpretation
+![Grad-CAM](assets/demo_gradcam.png)
+
+### 3. Uncertainty Quantification
+![Uncertainty](assets/demo_uncertainty.png)
 
 ## 🔮 Future Improvements
 - Extend segmentation to full 3D Volumetric Analysis.
