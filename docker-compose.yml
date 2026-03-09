@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  medical-imaging-app:
+    build: .
+    container_name: medical-imaging-analysis
+    ports:
+      - "8501:8501"
+    volumes:
+      # Mount data directory for persistent storage
+      - ./data:/app/data
+      # Mount outputs directory to save results
+      - ./outputs:/app/outputs
+      # Mount models directory (if you want to update models without rebuilding)
+      - ./models:/app/models
+    environment:
+      - STREAMLIT_SERVER_MAX_UPLOAD_SIZE=200
+      - STREAMLIT_SERVER_ENABLE_CORS=false
+      - STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION=true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s

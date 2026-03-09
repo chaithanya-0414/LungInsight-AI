@@ -1,0 +1,26 @@
+__pycache__/
+*.pyc
+*.pyo
+venv/
+env/
+.env
+
+# Model weights
+models/*.pth
+models/*.pt
+
+# Streamlit config/cache
+.streamlit/
+.DS_Store
+
+# Data
+data/raw/
+data/processed/
+data/train/
+data/valid/
+data/test/
+
+# Generated files
+outputs/
+outputs_test/
+*.pdf
