@@ -92,7 +92,12 @@ def generate_full_report(filename, data):
         m = data['main']
         pdf.add_key_value("Tumor Pixels", m.get('area_px', 'N/A'))
         pdf.add_key_value("Coverage", f"{m.get('coverage_pct', 0):.2f}%")
-        pdf.add_key_value("Stage", m.get('stage', 'N/A'))
+        
+        # New Subtype Information
+        pdf.add_key_value("Diagnosis Status", m.get('stage', 'N/A'))
+        if 'subtype' in m:
+            pdf.add_key_value("Predicted Subtype", m.get('subtype', 'Unknown'))
+            pdf.add_key_value("Subtype Confidence", f"{m.get('confidence', 0):.1f}%")
         
         if 'overlay_img' in m:
             pdf.add_image(m['overlay_img'], "Segmentation Result", width=120)

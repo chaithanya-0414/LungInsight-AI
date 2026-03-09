@@ -1,88 +1,75 @@
-# AI Lung Cancer Detection System 🫁
+# LungInsight AI: Advanced Lung Cancer Analysis Platform 🫁
 
-![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)
-![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red.svg)
-![Streamlit](https://img.shields.io/badge/Streamlit-1.20+-FF4B4B.svg)
-![License](https://img.shields.io/badge/license-MIT-green.svg)
+[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/)
+[![PyTorch 2.0](https://img.shields.io/badge/PyTorch-2.0+-red.svg)](https://pytorch.org/)
+[![Streamlit](https://img.shields.io/badge/Streamlit-1.20+-FF4B4B.svg)](https://streamlit.io/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## 📖 Overview
-This project is an advanced, production-ready medical AI system designed for automated lung tumor segmentation and comprehensive clinical analysis from CT scans. It combines PyTorch deep learning architecture (UNet & Attention UNet) with a full Web Dashboard (Streamlit) for real-time inference, generating clinically-interpretable PDF reports securely.
+**LungInsight AI** is a state-of-the-art medical imaging platform designed for automated lung tumor analysis. It goes beyond simple segmentation by providing histological subtype classification and clinical staging, assisted by explainable AI (Grad-CAM) and uncertainty quantification.
 
-## 🎯 Problem Statement
-Radiological analysis of lung nodules across hundreds of CT slices is highly time-consuming and prone to human error. This system automates pixel-level tumor segmentation, computes clinical metrics (Dice, IoU), extracts 25+ quantitative Radiomics features, and visualizes model attention using Grad-CAM to assist medical professionals in rapid, accurate diagnosis.
+## 🎯 Key Features
+- **Precision Segmentation**: Pixel-level tumor identification using UNet and Attention-UNet architectures.
+- **Histological Subtyping**: ROI-focused classification into **Adenocarcinoma**, **Squamous Cell Carcinoma**, and **Large Cell Carcinoma**.
+- **Clinical Staging (The Roots)**: Automated staging (Initial, Mid, Final) based on tumor area thresholds.
+- **Explainable AI (XAI)**: Visual interpretation of model decisions through Grad-CAM heatmaps.
+- **Uncertainty Quantification**: Monte Carlo Dropout-based confidence mapping for clinical reliability.
+- **Radiomics Extraction**: Automated calculation of 50+ specialized features (Shape, Intensity, Texture).
+- **Interactive Dashboard**: A comprehensive Streamlit-based workspace for radiologists.
 
-## ✨ Features
-- **Automated Tumor Segmentation**: Pixel-level tumor identification using UNet and Attention-UNet.
-- **Model Explainability**: Grad-CAM heatmaps showing what the AI focuses on.
-- **Uncertainty Quantification**: Confidence estimation using Monte Carlo Dropout.
-- **Clinical Dashboard**: An interactive Streamlit Web UI.
-- **Comprehensive Reporting**: Multi-page PDF generation detailing metrics & staging.
-- **Foreign Object Detection**: Auto-detection and handling of medical implants/artifacts.
+## 🏗️ Technical Architecture
+The system employs a dual-stage deep learning pipeline for maximum accuracy:
 
-## 🛠️ Tech Stack
-- **Languages:** Python
-- **Deep Learning:** PyTorch
-- **Computer Vision:** OpenCV, Scikit-image
-- **Web Interface:** Streamlit
-- **Medical Parsing:** pydicom, nibabel
+1. **Segmentation Stage**: A UNet model extracts the tumor perimeter from raw CT slices.
+2. **Classification Stage**: A DenseNet121 model analyzes a 2-channel ROI (Image + Mask) to determine the tumor subtype.
 
-## 🏗️ Project Architecture
-```text
-Dataset (CT Scans / DICOM / NIfTI)
-   ↓
-Preprocessing Pipeline (Denoising, Resizing, Normalization)
-   ↓
-Deep Learning Inferencing (PyTorch UNet / Attention UNet)
-   ↓
-Post-Processing (Morphology, Object Handling)
-   ↓
-Clinical Dashboard (Streamlit GUI & PDF Generation)
+```mermaid
+graph TD
+    A[Raw CT scan] --> B[UNet Segmentation]
+    B --> C[Tumor Mask]
+    C --> D[ROI Extraction & Cropping]
+    D --> E[DenseNet121 Classifier]
+    E --> F[Subtype Diagnosis]
+    C --> G[Staging Logic]
+    G --> H[Initial/Mid/Final Stage]
 ```
 
-## 🚀 Installation & Setup
+## � Example Outputs
 
-1. **Clone the repository:**
+### 1. Main Segmentation & Subtyping
+The dashboard provides clear overlays and classification metrics.
+![Main Analysis](https://raw.githubusercontent.com/your-username/lung-cancer-detection-ai/main/docs/assets/main_analysis.png)
+*(Example: Adenocarcinoma detected with 94.2% confidence)*
+
+### 2. Staging Review (Roots)
+A dedicated tab for reviewing the area-based staging logic.
+![Staging Review](https://raw.githubusercontent.com/your-username/lung-cancer-detection-ai/main/docs/assets/staging_review.png)
+*(Example: Stage FINAL indicated by red color coding)*
+
+### 3. Model Interpretability (Grad-CAM)
+Understand where the model "looks" to make its prediction.
+![Grad-CAM Output](https://raw.githubusercontent.com/your-username/lung-cancer-detection-ai/main/docs/assets/gradcam_sample.png)
+
+## 🚀 Getting Started
+
+### Installation
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/your-username/LungInsight-AI.git
+   cd LungInsight-AI
+   ```
+2. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+### Running the Dashboard
 ```bash
-git clone https://github.com/your-username/lung-cancer-detection-ai.git
-cd lung-cancer-detection-ai
+streamlit run dashboard/app_enhanced.py
 ```
 
-2. **Install dependencies:**
-```bash
-pip install -r requirements.txt
-```
-
-3. **Run the Dashboard:**
-```bash
-streamlit run app_enhanced.py
-```
-
-## 📊 Training the Model
-To retrain the models locally on your dataset:
-```bash
-# Basic Training
-python train.py
-
-# Advanced Training (with Focal Tversky Loss, etc.)
-python train_advanced.py --loss focal_tversky --model attention_unet --epochs 50
-```
-
-## 📸 Dashboard Interface
-*Our system generates comprehensive visual interpretation beyond standard segmentation.*
-
-### 1. Tumor Segmentation
-![Segmentation](assets/demo_segmentation.png)
-
-### 2. Grad-CAM Interpretation
-![Grad-CAM](assets/demo_gradcam.png)
-
-### 3. Uncertainty Quantification
-![Uncertainty](assets/demo_uncertainty.png)
-
-## 🔮 Future Improvements
-- Extend segmentation to full 3D Volumetric Analysis.
-- Migrate web dashboard to a robust FastAPI + React architecture.
-- Integrate PACS/Hospital System pipeline.
+## 🧬 Dataset
+The system is trained on diverse lung CT datasets. For more details on the data structure and volume, see [docs/dataset.md](docs/dataset.md).
 
 ## 📄 License
-This project is licensed under the MIT License - see the `LICENSE` file for details.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

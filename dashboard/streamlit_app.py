@@ -311,11 +311,11 @@ if __name__ == "__main__":
                      
                      col1, col2 = st.columns(2)
                      with col1:
-                         st.image(arr, caption="Original DICOM (Processed)", use_column_width=True)
+                         st.image(arr, caption="Original DICOM (Processed)", use_container_width=True)
                          if foreign_mask is not None and foreign_mask.sum() > 0:
-                             st.image(foreign_mask * 255, caption="Foreign Object Mask", clamp=True, use_column_width=True)
+                             st.image(foreign_mask * 255, caption="Foreign Object Mask", clamp=True, use_container_width=True)
                      with col2:
-                         st.image(overlay_rgb(arr, mask, color=stage_color), caption="Segmentation", use_column_width=True)
+                         st.image(overlay_rgb(arr, mask, color=stage_color), caption="Segmentation", use_container_width=True)
                      
                      # Comparison
                      gt_upload = st.file_uploader("Upload Ground Truth Mask (Optional)", type=["png", "jpg"])
@@ -390,14 +390,14 @@ if __name__ == "__main__":
                     
                     col1, col2 = st.columns(2)
                     with col1:
-                         st.image(arr, caption=f"Slice {slice_idx} (Processed)", use_column_width=True)
+                         st.image(arr, caption=f"Slice {slice_idx} (Processed)", use_container_width=True)
                          if foreign_mask is not None and foreign_mask.sum() > 0:
-                             st.image(foreign_mask * 255, caption="Foreign Object Mask", clamp=True, use_column_width=True)
+                             st.image(foreign_mask * 255, caption="Foreign Object Mask", clamp=True, use_container_width=True)
                     with col2:
                          stage_color = (255, 0, 0)
                          if t1_px and area_px <= t1_px: stage_color = (0, 255, 0)
                          elif t2_px and area_px <= t2_px: stage_color = (0, 0, 255)
-                         st.image(overlay_rgb(arr, mask, color=stage_color), caption="Segmentation", use_column_width=True)
+                         st.image(overlay_rgb(arr, mask, color=stage_color), caption="Segmentation", use_container_width=True)
                     
                     st.subheader("Analysis")
                     c1, c2, c3 = st.columns(3)
